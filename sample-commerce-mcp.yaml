@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=./schema/local.json
+binds:
+- listeners:
+  - routes:
+    # Sample Commerce MCP Server with Auth0 authentication
+    # Exposes:
+    #   - MCP server at /commerce/mcp
+    #   - Well-known OAuth Resource Metadata at /.well-known/oauth-protected-resource/commerce/mcp
+    #   - Well-known OAuth Authorization Server at /.well-known/oauth-authorization-server/commerce/mcp
+    - backends:
+      - mcp:
+          targets:
+          - name: commerce-native
+            mcp:
+              host: http://localhost:8009/mcp
+      matches:
+      - path:
+          exact: /commerce/mcp
+      - path:
+          exact: /.well-known/oauth-protected-resource/commerce/mcp
+      - path:
+          exact: /.well-known/oauth-authorization-server/commerce/mcp
+      policies:
+        cors:
+          allowHeaders:
+          - mcp-protocol-version
+          - content-type
+          - authorization
+          allowOrigins:
+          - '*'
+        backendAuth:
+          passthrough: {}
+        mcpAuthentication:
+          issuer: https://sandbox.grainger-development.auth0app.com/
+          audiences:
+          - api://commerce
+          - http://localhost:3000/commerce/mcp
+          jwks:
+            url: https://sandbox.grainger-development.auth0app.com/.well-known/jwks.json
+          provider:
+            auth0: {}
+          resourceMetadata:
+            resource: http://localhost:3000/commerce/mcp
+            scopesSupported:  
+            - openid
+            - profile
+            - offline_access
+            bearerMethodsSupported:
+            - header
+            - body
+            - query
+            resourceDocumentation: http://localhost:3000/commerce/docs
+            resourcePolicyUri: http://localhost:3000/commerce/policies
+
+  # Public port to listen on
+  port: 3000
