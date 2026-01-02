@@ -48,7 +48,7 @@ impl From<&proto::agent::TlsConfig> for ServerTLSConfig {
 				scb.with_no_client_auth()
 			};
 			let mut sc = scb.with_single_cert(cert_chain, private_key)?;
-			// Defaults set here. These can be overriden by Frontend policy
+			// Defaults set here. These can be overridden by Frontend policy
 			// TODO: this default only makes sense for HTTPS, distinguish from TLS
 			sc.alpn_protocols = vec![b"h2".into(), b"http/1.1".into()];
 			Ok(sc)
@@ -114,6 +114,11 @@ impl TryFrom<&proto::agent::backend_policy_spec::McpAuthentication> for McpAuthe
 		m: &proto::agent::backend_policy_spec::McpAuthentication,
 	) -> Result<Self, Self::Error> {
 		let provider = match m.provider {
+			x if x
+				== proto::agent::backend_policy_spec::mcp_authentication::McpIdp::Unspecified as i32 =>
+			{
+				None
+			},
 			x if x == proto::agent::backend_policy_spec::mcp_authentication::McpIdp::Auth0 as i32 => {
 				Some(McpIDP::Auth0 {})
 			},
@@ -144,10 +149,21 @@ impl TryFrom<&proto::agent::backend_policy_spec::McpAuthentication> for McpAuthe
 				))
 			})?;
 
-		// Create JWT validator with Optional mode (default for MCP auth)
-		let jwt_validator =
-			http::jwt::Jwt::from_providers(vec![jwt_provider], http::jwt::Mode::Optional);
+		let mode = match proto::agent::backend_policy_spec::mcp_authentication::Mode::try_from(m.mode)
+			.map_err(|_| ProtoError::EnumParse("invalid JWT mode".to_string()))?
+		{
+			proto::agent::backend_policy_spec::mcp_authentication::Mode::Optional => {
+				http::jwt::Mode::Optional
+			},
+			proto::agent::backend_policy_spec::mcp_authentication::Mode::Strict => {
+				http::jwt::Mode::Strict
+			},
+			proto::agent::backend_policy_spec::mcp_authentication::Mode::Permissive => {
+				http::jwt::Mode::Permissive
+			},
+		};
 
+		let jwt_validator = http::jwt::Jwt::from_providers(vec![jwt_provider], mode);
 		Ok(McpAuthentication {
 			issuer: m.issuer.clone(),
 			audiences: m.audiences.clone(),
@@ -169,6 +185,7 @@ impl TryFrom<&proto::agent::backend_policy_spec::McpAuthentication> for McpAuthe
 				ResourceMetadata { extra }
 			},
 			jwt_validator: std::sync::Arc::new(jwt_validator),
+			mode,
 		})
 	}
 }
@@ -183,6 +200,7 @@ fn convert_route_type(proto_rt: i32) -> llm::RouteType {
 		Ok(ProtoRT::Passthrough) => llm::RouteType::Passthrough,
 		Ok(ProtoRT::Responses) => llm::RouteType::Responses,
 		Ok(ProtoRT::AnthropicTokenCount) => llm::RouteType::AnthropicTokenCount,
+		Ok(ProtoRT::Embeddings) => llm::RouteType::Embeddings,
 		Err(_) => {
 			warn!(
 				"Unknown proto RouteType value {}, defaulting to Completions",
@@ -417,6 +435,17 @@ impl TryFrom<&proto::agent::Bind> for Bind {
 			key: s.key.clone().into(),
 			address: SocketAddr::from((IpAddr::from([0, 0, 0, 0]), s.port as u16)),
 			listeners: Default::default(),
+			protocol: match proto::agent::bind::Protocol::try_from(s.protocol)? {
+				proto::agent::bind::Protocol::Http => BindProtocol::http,
+				proto::agent::bind::Protocol::Tcp => BindProtocol::tcp,
+				proto::agent::bind::Protocol::Tls => BindProtocol::tls,
+			},
+			tunnel_protocol: match proto::agent::bind::TunnelProtocol::try_from(s.tunnel_protocol)? {
+				proto::agent::bind::TunnelProtocol::Direct => TunnelProtocol::Direct,
+				proto::agent::bind::TunnelProtocol::HboneGateway => TunnelProtocol::HboneGateway,
+				proto::agent::bind::TunnelProtocol::HboneWaypoint => TunnelProtocol::HboneWaypoint,
+				proto::agent::bind::TunnelProtocol::Proxy => TunnelProtocol::Proxy,
+			},
 		})
 	}
 }
@@ -837,6 +866,7 @@ impl TryFrom<&proto::agent::BackendPolicySpec> for BackendPolicy {
 						HttpVersion::Http1 => Some(::http::Version::HTTP_11),
 						HttpVersion::Http2 => Some(::http::Version::HTTP_2),
 					},
+					request_timeout: bhttp.request_timeout.map(convert_duration),
 				})
 			},
 			Some(bps::Kind::BackendTcp(btcp)) => BackendPolicy::TCP(backend::TCP {
@@ -1202,6 +1232,8 @@ impl TryFrom<&proto::agent::TrafficPolicySpec> for TrafficPolicy {
 					domain: rrl.domain.clone(),
 					target: Arc::new(target),
 					descriptors: Arc::new(http::remoteratelimit::DescriptorSet(descriptors)),
+					// Not supported over XDS; use a timeout on the backend itself
+					timeout: None,
 				})
 			},
 			Some(tps::Kind::Csrf(csrf_spec)) => {
@@ -1663,6 +1695,9 @@ fn convert_regex_rules(
 							},
 							proto::agent::backend_policy_spec::ai::BuiltinRegexRule::Email => {
 								llm::policy::Builtin::Email
+							},
+							proto::agent::backend_policy_spec::ai::BuiltinRegexRule::CaSin => {
+								llm::policy::Builtin::CaSin
 							},
 							_ => {
 								warn!(value = *b, "Unknown builtin regex rule, skipping");

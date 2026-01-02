@@ -14,7 +14,7 @@ use tracing::{debug, trace};
 
 use crate::mcp::MCPOperation;
 use crate::proxy::ProxyResponseReason;
-use crate::types::agent::BindProtocol;
+use crate::types::agent::TransportProtocol;
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
 pub struct RouteIdentifier {
@@ -23,6 +23,31 @@ pub struct RouteIdentifier {
 	pub listener: DefaultedUnknown<RichStrng>,
 	pub route: DefaultedUnknown<RichStrng>,
 	pub route_rule: DefaultedUnknown<RichStrng>,
+}
+
+#[derive(
+	Copy, Clone, Hash, Debug, PartialEq, Eq, prometheus_client::encoding::EncodeLabelValue, Default,
+)]
+pub enum GuardrailPhase {
+	#[default]
+	Request,
+	Response,
+}
+
+#[derive(
+	Copy, Clone, Hash, Debug, PartialEq, Eq, prometheus_client::encoding::EncodeLabelValue, Default,
+)]
+pub enum GuardrailAction {
+	#[default]
+	Allow,
+	Mask,
+	Reject,
+}
+
+#[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
+pub struct GuardrailLabels {
+	pub phase: GuardrailPhase,
+	pub action: GuardrailAction,
 }
 
 #[derive(Clone, Hash, Default, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -83,7 +108,7 @@ pub struct TCPLabels {
 	pub bind: DefaultedUnknown<RichStrng>,
 	pub gateway: DefaultedUnknown<RichStrng>,
 	pub listener: DefaultedUnknown<RichStrng>,
-	pub protocol: BindProtocol,
+	pub protocol: TransportProtocol,
 }
 
 #[derive(Clone, Hash, Debug, PartialEq, Eq, EncodeLabelSet)]
@@ -120,6 +145,9 @@ pub struct Metrics {
 	pub tcp_downstream_tx_bytes: Family<TCPLabels, counter::Counter>,
 
 	pub upstream_connect_duration: Histogram<ConnectLabels>,
+
+	// metrics for guardrail checks (allow/mask/reject) for request/response
+	pub guardrail_checks: Family<GuardrailLabels, counter::Counter>,
 }
 
 // FilteredRegistry is a wrapper around Registry that allows to filter out certain metrics.
@@ -243,6 +271,15 @@ impl Metrics {
 				"requests",
 				"The total number of HTTP requests sent",
 			),
+			guardrail_checks: {
+				let m = Family::<GuardrailLabels, _>::default();
+				registry.register(
+					"guardrail_checks",
+					"Total number of guardrail checks",
+					m.clone(),
+				);
+				m
+			},
 			downstream_connection: build(
 				&mut registry,
 				"downstream_connections",

@@ -21,16 +21,17 @@ use crate::mcp::McpAuthorization;
 use crate::store::LocalWorkload;
 use crate::types::agent::{
 	A2aPolicy, Authorization, Backend, BackendKey, BackendPolicy, BackendReference,
-	BackendWithPolicies, Bind, BindKey, FrontendPolicy, Listener, ListenerKey, ListenerName,
-	ListenerProtocol, ListenerSet, ListenerTarget, LocalMcpAuthentication, McpAuthentication,
-	McpBackend, McpTarget, McpTargetName, McpTargetSpec, OpenAPITarget, PathMatch, PolicyPhase,
-	PolicyTarget, PolicyType, ResourceName, Route, RouteBackendReference, RouteMatch, RouteName,
-	RouteSet, ServerTLSConfig, SimpleBackend, SimpleBackendReference, SimpleBackendWithPolicies,
-	SseTargetSpec, StreamableHTTPTargetSpec, TCPRoute, TCPRouteBackendReference, TCPRouteSet, Target,
-	TargetedPolicy, TrafficPolicy, TypedResourceName,
+	BackendWithPolicies, Bind, BindKey, BindProtocol, FrontendPolicy, Listener, ListenerKey,
+	ListenerName, ListenerProtocol, ListenerSet, ListenerTarget, LocalMcpAuthentication,
+	McpAuthentication, McpBackend, McpTarget, McpTargetName, McpTargetSpec, OpenAPITarget, PathMatch,
+	PolicyPhase, PolicyTarget, PolicyType, ResourceName, Route, RouteBackendReference, RouteMatch,
+	RouteName, RouteSet, ServerTLSConfig, SimpleBackend, SimpleBackendReference,
+	SimpleBackendWithPolicies, SseTargetSpec, StreamableHTTPTargetSpec, TCPRoute,
+	TCPRouteBackendReference, TCPRouteSet, Target, TargetedPolicy, TrafficPolicy, TunnelProtocol,
+	TypedResourceName,
 };
 use crate::types::discovery::{NamespacedHostname, Service};
-use crate::types::frontend;
+use crate::types::{backend, frontend};
 use crate::*;
 
 impl NormalizedLocalConfig {
@@ -79,12 +80,16 @@ pub struct LocalConfig {
 	#[serde(default)]
 	#[cfg_attr(feature = "schema", schemars(with = "serde_json::value::RawValue"))]
 	services: Vec<Service>,
+	#[serde(default)]
+	backends: Vec<FullLocalBackend>,
 }
 
 #[apply(schema_de!)]
 struct LocalBind {
 	port: u16,
 	listeners: Vec<LocalListener>,
+	#[serde(default)]
+	tunnel_protocol: TunnelProtocol,
 }
 
 #[apply(schema_de!)]
@@ -173,6 +178,14 @@ pub struct LocalRouteBackend {
 
 fn default_weight() -> usize {
 	1
+}
+
+#[apply(schema_de!)]
+pub struct FullLocalBackend {
+	name: BackendKey,
+	host: Target,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	policies: Option<LocalBackendPolicies>,
 }
 
 #[apply(schema_de!)]
@@ -670,6 +683,13 @@ pub struct LocalBackendPolicies {
 	/// Authenticate to the backend.
 	#[serde(default)]
 	pub backend_auth: Option<BackendAuth>,
+
+	/// Specify HTTP settings for the backend
+	#[serde(default)]
+	pub http: Option<backend::HTTP>,
+	/// Specify TCP settings for the backend
+	#[serde(default)]
+	pub tcp: Option<backend::TCP>,
 }
 
 impl LocalBackendPolicies {
@@ -683,8 +703,16 @@ impl LocalBackendPolicies {
 			ai,
 			backend_tls,
 			backend_auth,
+			http,
+			tcp,
 		} = self;
 		let mut pols = vec![];
+		if let Some(p) = tcp {
+			pols.push(BackendPolicy::TCP(p));
+		}
+		if let Some(p) = http {
+			pols.push(BackendPolicy::HTTP(p));
+		}
 		if let Some(p) = request_header_modifier {
 			pols.push(BackendPolicy::RequestHeaderModifier(p));
 		}
@@ -868,6 +896,7 @@ async fn convert(
 		policies,
 		workloads,
 		services,
+		backends,
 	} = i;
 	let mut all_policies = vec![];
 	let mut all_backends = vec![];
@@ -890,7 +919,9 @@ async fn convert(
 		let b = Bind {
 			key: bind_name,
 			address: sockaddr,
+			protocol: detect_bind_protocol(&ls),
 			listeners: ls,
+			tunnel_protocol: b.tunnel_protocol,
 		};
 		all_binds.push(b)
 	}
@@ -920,6 +951,18 @@ async fn convert(
 
 	all_policies.extend_from_slice(&split_frontend_policies(gateway, frontend_policies).await?);
 
+	for b in backends {
+		let policies = b
+			.policies
+			.map(|p| p.translate())
+			.transpose()?
+			.unwrap_or_default();
+		all_backends.push(BackendWithPolicies {
+			backend: Backend::Opaque(local_name(b.name), b.host),
+			inline_policies: policies,
+		})
+	}
+
 	Ok(NormalizedLocalConfig {
 		binds: all_binds,
 		policies: all_policies,
@@ -928,6 +971,28 @@ async fn convert(
 		workloads,
 		services,
 	})
+}
+
+fn detect_bind_protocol(listeners: &ListenerSet) -> BindProtocol {
+	if listeners
+		.iter()
+		.any(|l| matches!(l.protocol, ListenerProtocol::HTTPS(_)))
+	{
+		return BindProtocol::tls;
+	}
+	if listeners
+		.iter()
+		.any(|l| matches!(l.protocol, ListenerProtocol::TLS(_)))
+	{
+		return BindProtocol::tls;
+	}
+	if listeners
+		.iter()
+		.any(|l| matches!(l.protocol, ListenerProtocol::TCP))
+	{
+		return BindProtocol::tcp;
+	}
+	BindProtocol::http
 }
 
 async fn convert_listener(

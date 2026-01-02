@@ -19,8 +19,8 @@ use crate::proxy::httpproxy::PolicyClient;
 use crate::store::Event;
 use crate::types::agent::{
 	A2aPolicy, Backend, BackendKey, BackendPolicy, BackendTarget, BackendWithPolicies, Bind, BindKey,
-	FrontendPolicy, Listener, ListenerKey, ListenerName, ListenerSet, McpAuthentication, PolicyKey,
-	PolicyTarget, Route, RouteKey, RouteName, TCPRoute, TargetedPolicy, TrafficPolicy,
+	FrontendPolicy, Listener, ListenerKey, ListenerName, McpAuthentication, PolicyKey, PolicyTarget,
+	Route, RouteKey, RouteName, TCPRoute, TargetedPolicy, TrafficPolicy,
 };
 use crate::types::proto::agent::resource::Kind as XdsKind;
 use crate::types::proto::agent::{
@@ -682,9 +682,25 @@ impl Store {
 		pol
 	}
 
-	pub fn listeners(&self, bind: BindKey) -> Option<ListenerSet> {
-		// TODO: clone here is terrible!!!
-		self.binds.get(&bind).map(|b| b.listeners.clone())
+	pub fn bind(&self, bind: BindKey) -> Option<Arc<Bind>> {
+		self.binds.get(&bind).cloned()
+	}
+
+	/// find_bind looks up a bind by address. Typically, this is done by the kernel for us, but in some cases
+	/// we do userspace routing to a bind.
+	pub fn find_bind(&self, want: SocketAddr) -> Option<Arc<Bind>> {
+		self
+			.binds
+			.values()
+			.find(|b| {
+				let have = b.address;
+				if have.ip().is_unspecified() {
+					have.port() == want.port()
+				} else {
+					have == want
+				}
+			})
+			.cloned()
 	}
 
 	pub fn all(&self) -> Vec<Arc<Bind>> {

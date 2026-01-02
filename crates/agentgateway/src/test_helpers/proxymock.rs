@@ -33,11 +33,11 @@ use crate::store::Stores;
 use crate::transport::stream::{Socket, TCPConnectionInfo};
 use crate::transport::tls;
 use crate::types::agent::{
-	Backend, BackendReference, BackendWithPolicies, Bind, BindKey, Listener, ListenerProtocol,
-	ListenerSet, McpBackend, McpTarget, McpTargetSpec, PathMatch, ResourceName, Route,
-	RouteBackendReference, RouteMatch, RouteName, RouteSet, SimpleBackendReference, SseTargetSpec,
-	StreamableHTTPTargetSpec, TCPRoute, TCPRouteBackendReference, TCPRouteSet, Target,
-	TargetedPolicy,
+	Backend, BackendPolicy, BackendReference, BackendWithPolicies, Bind, BindKey, BindProtocol,
+	Listener, ListenerProtocol, ListenerSet, McpBackend, McpTarget, McpTargetSpec, PathMatch,
+	ResourceName, Route, RouteBackendReference, RouteMatch, RouteName, RouteSet,
+	SimpleBackendReference, SseTargetSpec, StreamableHTTPTargetSpec, TCPRoute,
+	TCPRouteBackendReference, TCPRouteSet, Target, TargetedPolicy,
 };
 use crate::types::local::LocalNamedAIProvider;
 use crate::{ProxyInputs, client, mcp};
@@ -217,6 +217,8 @@ pub fn simple_bind(route: Route) -> Bind {
 			tcp_routes: Default::default(),
 			routes: RouteSet::from_list(vec![route]),
 		}]),
+		protocol: BindProtocol::http,
+		tunnel_protocol: Default::default(),
 	}
 }
 
@@ -233,6 +235,8 @@ pub fn simple_tcp_bind(route: TCPRoute) -> Bind {
 			tcp_routes: TCPRouteSet::from_list(vec![route]),
 			routes: Default::default(),
 		}]),
+		protocol: BindProtocol::tcp,
+		tunnel_protocol: Default::default(),
 	}
 }
 
@@ -320,6 +324,7 @@ impl tower::Service<Uri> for MemoryConnector {
 				peer_addr: "127.0.0.1:12345".parse().unwrap(),
 				local_addr: "127.0.0.1:80".parse().unwrap(),
 				start: Instant::now(),
+				raw_peer_addr: None,
 			},
 		);
 		if let Some(tls_config) = self.tls_config.clone() {
@@ -382,6 +387,16 @@ impl TestBind {
 	}
 
 	pub fn with_mcp_backend(self, b: SocketAddr, stateful: bool, legacy_sse: bool) -> Self {
+		self.with_mcp_backend_policies(b, stateful, legacy_sse, Default::default())
+	}
+
+	pub fn with_mcp_backend_policies(
+		self,
+		b: SocketAddr,
+		stateful: bool,
+		legacy_sse: bool,
+		policies: Vec<BackendPolicy>,
+	) -> Self {
 		let opb = Backend::Opaque(
 			ResourceName::new(strng::format!("basic-{}", b), "".into()),
 			Target::Address(b),
@@ -411,7 +426,13 @@ impl TestBind {
 		{
 			let mut bw = self.pi.stores.binds.write();
 			bw.insert_backend(opb.name(), opb.into());
-			bw.insert_backend(b.name(), b.into());
+			bw.insert_backend(
+				b.name(),
+				BackendWithPolicies {
+					backend: b,
+					inline_policies: policies,
+				},
+			);
 		}
 		self
 	}
@@ -520,9 +541,17 @@ impl TestBind {
 				peer_addr: "127.0.0.1:12345".parse().unwrap(),
 				local_addr: "127.0.0.1:80".parse().unwrap(),
 				start: Instant::now(),
+				raw_peer_addr: None,
 			},
 		);
-		let bind = Gateway::proxy_bind(bind_name, server, self.pi.clone(), self.drain_rx.clone());
+		let bind = self.pi.stores.read_binds().bind(bind_name.clone()).unwrap();
+		let bind = Gateway::proxy_bind(
+			bind_name,
+			bind.protocol,
+			server,
+			self.pi.clone(),
+			self.drain_rx.clone(),
+		);
 		tokio::spawn(async move {
 			info!("starting bind...");
 			bind.await;
@@ -551,7 +580,13 @@ impl TestBind {
 
 				let socket = Socket::from_tcp(tcp_stream).unwrap();
 
-				let bind = Gateway::proxy_bind(bind_name.clone(), socket, pi.clone(), drain_rx.clone());
+				let bind = Gateway::proxy_bind(
+					bind_name.clone(),
+					BindProtocol::http,
+					socket,
+					pi.clone(),
+					drain_rx.clone(),
+				);
 				tokio::spawn(bind);
 			}
 			info!("finished real listener...");

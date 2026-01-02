@@ -14,6 +14,7 @@ use crate::http::ext_authz::proto::{
 	AttributeContext, CheckRequest, DeniedHttpResponse, HeaderValueOption, Metadata, OkHttpResponse,
 };
 use crate::http::ext_proc::GrpcReferenceChannel;
+use crate::http::filters::BackendRequestTimeout;
 use crate::http::transformation_cel::SerAsStr;
 use crate::http::{HeaderName, HeaderOrPseudo, HeaderValue, PolicyResponse, Request, jwt};
 use crate::proxy::ProxyError;
@@ -233,6 +234,8 @@ impl ExtAuthz {
 		let chan = GrpcReferenceChannel {
 			target: self.target.clone(),
 			client,
+			// Set the request timeout. This can be overridden by a timeout on the Backend object itself.
+			timeout: Some(self.timeout.unwrap_or(Duration::from_millis(200))),
 		};
 		let mut grpc_client = AuthorizationClient::new(chan);
 		// Get connection info with proper error handling
@@ -408,16 +411,8 @@ impl ExtAuthz {
 				tls_session,
 			}),
 		};
-		let timeout_duration = self.timeout.unwrap_or(Duration::from_millis(200));
-		let check_future = grpc_client.check(authz_req);
 
-		let resp = match tokio::time::timeout(timeout_duration, check_future).await {
-			Ok(result) => result,
-			Err(_) => {
-				warn!("ext_authz request timed out after {:?}", timeout_duration);
-				return self.handle_auth_failure("Authorization service timeout");
-			},
-		};
+		let resp = grpc_client.check(authz_req).await;
 
 		trace!("check response: {:?}", resp);
 		let cr = match resp {
@@ -550,26 +545,6 @@ impl ExtAuthz {
 			unreachable!();
 		};
 
-		let include = if self.include_request_headers.is_empty() {
-			&[HeaderOrPseudo::Header(http::header::AUTHORIZATION)]
-		} else {
-			self.include_request_headers.as_slice()
-		};
-		let mut headers = HeaderMap::with_capacity(include.len());
-		for h in include {
-			match h {
-				HeaderOrPseudo::Header(k) => {
-					req.headers().get_all(k).iter().for_each(|h| {
-						headers.append(k.clone(), h.clone());
-					});
-				},
-				_pseudo => {
-					// Ignored for HTTP.
-					// TODO: reject at config time.
-				},
-			}
-		}
-
 		let body = if let Some(body_opts) = &self.include_request_body {
 			let max_size = body_opts.max_request_bytes as usize;
 			match crate::http::inspect_body_with_limit(req.body_mut(), max_size).await {
@@ -617,7 +592,22 @@ impl ExtAuthz {
 		let mut check_req = rb
 			.body(http::Body::from(body))
 			.map_err(|e| ProxyError::Processing(e.into()))?;
-		*check_req.headers_mut() = headers;
+
+		// Include any request headers
+		let include = if self.include_request_headers.is_empty() {
+			&[HeaderOrPseudo::Header(http::header::AUTHORIZATION)]
+		} else {
+			self.include_request_headers.as_slice()
+		};
+		for h in include {
+			if let Some(hv) = http::get_pseudo_or_header_value(h, req) {
+				let _ = http::apply_header_or_pseudo(
+					&mut http::RequestOrResponse::Request(&mut check_req),
+					h,
+					hv.as_bytes(),
+				);
+			}
+		}
 
 		// Insert any headers derived from CEL expresions.
 		for (hn, hv) in add_request_headers {
@@ -639,16 +629,12 @@ impl ExtAuthz {
 				hv.as_bytes(),
 			);
 		}
-
-		let check = client.call_reference(check_req, &self.target);
+		// Set the request timeout. This can be overridden by a timeout on the Backend object itself.
 		let timeout_duration = self.timeout.unwrap_or(Duration::from_millis(200));
-		let resp = match tokio::time::timeout(timeout_duration, check).await {
-			Ok(result) => result,
-			Err(_) => {
-				warn!("ext_authz request timed out after {:?}", timeout_duration);
-				return self.handle_auth_failure("Authorization service timeout");
-			},
-		};
+		check_req
+			.extensions_mut()
+			.insert(BackendRequestTimeout(timeout_duration));
+		let resp = client.call_reference(check_req, &self.target).await;
 		let mut resp = match resp {
 			Ok(r) => r,
 			Err(e) => {

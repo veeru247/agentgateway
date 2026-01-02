@@ -36,6 +36,8 @@ use crate::*;
 pub struct Bind {
 	pub key: BindKey,
 	pub address: SocketAddr,
+	pub protocol: BindProtocol,
+	pub tunnel_protocol: TunnelProtocol,
 	pub listeners: ListenerSet,
 }
 
@@ -171,10 +173,30 @@ impl ListenerProtocol {
 	}
 }
 
-// Protocol of the entire bind. TODO: we should make this a property of the API
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, EncodeLabelValue)]
+// Protocol of the entire bind.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, EncodeLabelValue, Serialize)]
 #[allow(non_camel_case_types)]
 pub enum BindProtocol {
+	http,
+	// Note: TLS can be TLS (passthrough or termination) or HTTPS
+	tls,
+	tcp,
+}
+
+#[apply(schema!)]
+#[derive(Default, Copy, PartialEq, Eq, Hash, EncodeLabelValue)]
+pub enum TunnelProtocol {
+	#[default]
+	Direct,
+	HboneWaypoint,
+	HboneGateway,
+	Proxy,
+}
+
+// Protocol of the request
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, EncodeLabelValue)]
+#[allow(non_camel_case_types)]
+pub enum TransportProtocol {
 	http,
 	https,
 	hbone,
@@ -1496,6 +1518,7 @@ pub struct McpAuthentication {
 	pub provider: Option<McpIDP>,
 	pub resource_metadata: ResourceMetadata,
 	pub jwt_validator: Arc<crate::http::jwt::Jwt>,
+	pub mode: http::jwt::Mode,
 }
 
 // Non-xds config for MCP authentication
@@ -1506,6 +1529,8 @@ pub struct LocalMcpAuthentication {
 	pub provider: Option<McpIDP>,
 	pub resource_metadata: ResourceMetadata,
 	pub jwks: FileInlineOrRemote,
+	#[serde(default)]
+	pub mode: http::jwt::Mode,
 }
 
 impl LocalMcpAuthentication {
@@ -1529,7 +1554,7 @@ impl LocalMcpAuthentication {
 		};
 
 		Ok(http::jwt::LocalJwtConfig::Single {
-			mode: http::jwt::Mode::Optional,
+			mode: self.mode,
 			issuer: self.issuer.clone(),
 			audiences: Some(self.audiences.clone()),
 			jwks,
@@ -1549,6 +1574,7 @@ impl LocalMcpAuthentication {
 			provider: self.provider.clone(),
 			resource_metadata: self.resource_metadata.clone(),
 			jwt_validator: Arc::new(jwt),
+			mode: self.mode,
 		})
 	}
 }

@@ -97,7 +97,9 @@ impl App {
 						namespace: backend_group_name.namespace.clone(),
 						section: Some(t.name.clone()),
 					};
-					let backend_policies = binds.sub_backend_policies(sub_backend_target, inline_pols);
+					let backend_policies = backend_policies
+						.clone()
+						.merge(binds.sub_backend_policies(sub_backend_target, inline_pols));
 					Ok::<_, ProxyError>(Arc::new(McpTarget {
 						name: t.name.clone(),
 						spec: t.spec.clone(),
@@ -125,9 +127,6 @@ impl App {
 			.mcp_authorization
 			.unwrap_or_else(|| McpAuthorizationSet::new(RuleSets::from(Vec::new())));
 		let authn = backend_policies.mcp_authentication;
-		
-		// Check if backend auth passthrough is configured
-		let has_passthrough = matches!(backend_policies.backend_auth, Some(crate::http::auth::BackendAuth::Passthrough {}));
 
 		// Store an empty value, we will populate each field async
 		log.store(Some(MCPInfo::default()));
@@ -168,27 +167,42 @@ impl App {
 			match (authn.as_ref(), has_claims) {
 				// if mcp authn is configured, has a validator, and has no claims yet, validate
 				(Some(auth), false) => {
-					if let Ok(TypedHeader(Authorization(bearer))) = req
+					debug!(
+						"MCP auth configured; validating Authorization header (mode={:?})",
+						auth.mode
+					);
+					match req
 						.extract_parts::<TypedHeader<Authorization<Bearer>>>()
 						.await
 					{
-						match auth.jwt_validator.validate_claims(bearer.token()) {
-							Ok(claims) => {
-								// Populate context with verified JWT claims before continuing
-								ctx.with_jwt(&claims);
-								// Only remove Authorization header if passthrough is NOT configured
-								if !has_passthrough {
+						Ok(TypedHeader(Authorization(bearer))) => {
+							debug!("Authorization header present; validating JWT token");
+							match auth.jwt_validator.validate_claims(bearer.token()) {
+								Ok(claims) => {
+									debug!("JWT validation succeeded; inserting verified claims into context");
+									// Populate context with verified JWT claims before continuing
+									ctx.with_jwt(&claims);
 									req.headers_mut().remove(http::header::AUTHORIZATION);
-								}
-								req.extensions_mut().insert(claims);
-							},
-							Err(_e) => {
-								debug!("JWT validation failed: {:?}", _e);
+									req.extensions_mut().insert(claims);
+								},
+								Err(_e) => {
+									warn!("JWT validation failed; returning 401 (error: {:?})", _e);
+									return Self::create_auth_required_response(&req, auth).into_response();
+								},
+							}
+						},
+						Err(_missing_header) => {
+							// Enforce strict mode when Authorization header is missing
+							if matches!(auth.mode, jwt::Mode::Strict) {
+								debug!("Missing Authorization header and MCP auth is STRICT; returning 401");
 								return Self::create_auth_required_response(&req, auth).into_response();
-							},
-						}
+							}
+							// Optional/Permissive: continue without JWT
+							debug!(
+								"Missing Authorization header but MCP auth not STRICT; continuing without JWT"
+							);
+						},
 					}
-					// MCP authn validation happens in optional mode, so if no token is present, do nothing
 				},
 				// if mcp authn is configured but JWT already validated (claims exist from previous layer),
 				// reject because we cannot validate MCP-specific auth requirements
@@ -199,7 +213,11 @@ impl App {
 					return Self::create_auth_required_response(&req, auth).into_response();
 				},
 				// if no mcp authn is configured, do nothing
-				(None, _) => {},
+				(None, _) => {
+					debug!(
+						"No MCP authentication configured for backend; continuing without JWT enforcement"
+					);
+				},
 			}
 		}
 

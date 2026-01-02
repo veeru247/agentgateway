@@ -16,9 +16,9 @@ use crate::llm::{AIProvider, openai};
 use crate::proxy::request_builder::RequestBuilder;
 use crate::test_helpers::proxymock::*;
 use crate::types::agent::{
-	Backend, BackendPolicy, BackendReference, BackendWithPolicies, Bind, Listener, ListenerProtocol,
-	ListenerSet, PathMatch, PolicyTarget, ResourceName, Route, RouteBackendReference, RouteMatch,
-	RouteName, RouteSet, Target, TargetedPolicy, TrafficPolicy,
+	Backend, BackendPolicy, BackendReference, BackendWithPolicies, Bind, BindProtocol, Listener,
+	ListenerProtocol, ListenerSet, PathMatch, PolicyTarget, ResourceName, Route,
+	RouteBackendReference, RouteMatch, RouteName, RouteSet, Target, TargetedPolicy, TrafficPolicy,
 };
 use crate::types::backend;
 use crate::*;
@@ -259,6 +259,8 @@ async fn tls_termination() {
 			tcp_routes: Default::default(),
 			routes: RouteSet::from_list(vec![route]),
 		}]),
+		protocol: BindProtocol::tls,
+		tunnel_protocol: Default::default(),
 	};
 
 	let t = setup_proxy_test("{}")
@@ -362,6 +364,7 @@ async fn tls_backend_http2_version() {
 	.unwrap();
 	let backend_version = backend::HTTP {
 		version: Some(Version::HTTP_2),
+		..Default::default()
 	};
 
 	let t = setup_proxy_test("{}")
@@ -401,6 +404,7 @@ async fn tls_backend_http1_version() {
 	.unwrap();
 	let backend_version = backend::HTTP {
 		version: Some(Version::HTTP_11),
+		..Default::default()
 	};
 
 	let t = setup_proxy_test("{}")
@@ -441,6 +445,7 @@ async fn tls_backend_version_with_alpn() {
 	.unwrap();
 	let backend_version = backend::HTTP {
 		version: Some(Version::HTTP_2),
+		..Default::default()
 	};
 
 	let t = setup_proxy_test("{}")
