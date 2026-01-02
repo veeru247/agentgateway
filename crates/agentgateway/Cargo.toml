@@ -164,7 +164,7 @@ insta.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 which.workspace = true
-agentgateway = { version = "0.7.0", path = ".", default-features = false, features = [
+agentgateway = { version = "0.11.0", path = ".", default-features = false, features = [
     "testing",
 ] }
 rmcp = { workspace = true, features = [
