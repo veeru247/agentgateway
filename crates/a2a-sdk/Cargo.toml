@@ -1,6 +1,6 @@
 [package]
 name = "a2a-sdk"
-version = "0.7.0"
+version = "0.11.0"
 edition = "2024"
 description = "Unofficial Google A2A SDK. Currently supports v0.3.0 of the specification."
 license = "MIT"
